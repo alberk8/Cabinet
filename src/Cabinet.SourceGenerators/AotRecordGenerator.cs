@@ -11,6 +11,14 @@ namespace Cabinet.SourceGenerators;
 [Generator]
 public class AotRecordGenerator : IIncrementalGenerator
 {
+	private static readonly DiagnosticDescriptor MissingIdPropertyWarning = new(
+		id: "CAB001",
+		title: "AotRecord type is missing an ID property",
+		messageFormat: "Type '{0}' is decorated with [AotRecord] but has no resolvable ID property. Add an 'Id' or '{0}Id' property, or, if IdPropertyName is set on the attribute, ensure the named property exists on the type.",
+		category: "Cabinet.SourceGeneration",
+		defaultSeverity: DiagnosticSeverity.Warning,
+		isEnabledByDefault: true);
+
 	public void Initialize(IncrementalGeneratorInitializationContext context)
 	{
 		// Find all classes and records with [AotRecord] attribute
@@ -56,8 +64,6 @@ public class AotRecordGenerator : IIncrementalGenerator
 
 		// Find ID property
 		var idProperty = FindIdProperty(symbol, explicitIdPropertyName);
-		if (idProperty is null)
-			return null;
 
 		// Store whether the class is public for informational purposes; no validation occurs
 		var isPublic = symbol.DeclaredAccessibility == Accessibility.Public;
@@ -77,7 +83,7 @@ public class AotRecordGenerator : IIncrementalGenerator
 		return new ClassInfo(
 			symbol.Name,
 			symbol.ContainingNamespace.ToDisplayString(),
-			idProperty.Name,
+			idProperty?.Name,
 			fileName ?? symbol.Name,
 			accessibility,
 			isPublic,
@@ -121,12 +127,29 @@ public class AotRecordGenerator : IIncrementalGenerator
 		// Generate RecordSet extensions for each class
 		foreach (var classInfo in allClasses)
 		{
+			if (classInfo.IdPropertyName is null)
+			{
+				var typeDisplayName = string.IsNullOrWhiteSpace(classInfo.Namespace)
+					? classInfo.ClassName
+					: $"{classInfo.Namespace}.{classInfo.ClassName}";
+
+				context.ReportDiagnostic(Diagnostic.Create(
+					MissingIdPropertyWarning,
+					classInfo.Location,
+					typeDisplayName));
+				continue;
+			}
+
 			var extensionSource = GenerateRecordSetExtensions(classInfo);
 			context.AddSource($"{classInfo.ClassName}Extensions.g.cs", SourceText.From(extensionSource, Encoding.UTF8));
 		}
 
+		var validClasses = allClasses.Where(c => c.IdPropertyName is not null).ToList();
+		if (validClasses.Count == 0)
+			return;
+
 		// Generate store helper extensions
-		var storeExtensionsSource = GenerateStoreExtensions(allClasses);
+		var storeExtensionsSource = GenerateStoreExtensions(validClasses);
 		context.AddSource("CabinetStoreExtensions.g.cs", SourceText.From(storeExtensionsSource, Encoding.UTF8));
 	}
 
@@ -224,7 +247,7 @@ public class AotRecordGenerator : IIncrementalGenerator
 	private record ClassInfo(
 		string ClassName,
 		string Namespace,
-		string IdPropertyName,
+		string? IdPropertyName,
 		string FileName,
 		string Accessibility,
 		bool IsPublic,
